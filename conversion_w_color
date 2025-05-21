@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+import os
+import cv2
+import numpy as np
+import rospy
+import ros_numpy
+from sensor_msgs.msg import PointCloud2
+
+# Per-row pixel shifts for destaggering (from sensor metadata)
+PIX_SHIFT = np.array([
+     12, 12, 12, 12, 12, 12, 12, -4, 12, -4, 12, -4, 12, -4, 12, 4,
+     -4,-12, 12, 4, -4,-12, 12, 4, -4,-12, 12, 4, -4,-12, 12, 4,
+     -4,-12, 12, 4, -4,-12, 12, 4, -4,-12, 12, 4, -4,-12, 12, 4,
+     -4,-12, 4,-12, 4,-12, 4,-12, 4,-12,-12,-12,-12,-12,-12,-12
+], dtype=int)
+
+
+def destagger(pixel_shift_by_row: list, field: np.ndarray) -> np.ndarray:
+    """Apply per-row shifts to destagger a 2D lidar field."""
+    dest = np.zeros_like(field)
+    for u, shift in enumerate(pixel_shift_by_row):
+        dest[u, :] = np.roll(field[u, :], shift)
+    return dest
+
+
+def to_mono8(img: np.ndarray) -> np.ndarray:
+    """Normalize to 0-255 and convert to uint8."""
+    norm = cv2.normalize(img.astype(np.float32), None, 0, 255, cv2.NORM_MINMAX)
+    return norm.astype(np.uint8)
+
+
+def to_colormap(img: np.ndarray, cmap: int = cv2.COLORMAP_JET) -> np.ndarray:
+    """Convert a single-channel float image to a color-mapped BGR image."""
+    mono = to_mono8(img)
+    color = cv2.applyColorMap(mono, cmap)
+    return color
+
+
+# Directory to save frames
+tmp_dir = "/tmp/ouster_frames_color"
+os.makedirs(tmp_dir, exist_ok=True)
+
+
+def cloud_cb(msg: PointCloud2):
+    # Convert ROS PointCloud2 to a structured numpy array of shape (H, W)
+    cloud = ros_numpy.numpify(msg).reshape(msg.height, msg.width)
+    dst = destagger(PIX_SHIFT, cloud)
+    ts = msg.header.stamp.to_nsec()
+
+    # Save each channel with a distinct colormap
+    range_c     = to_colormap(dst['range'],       cv2.COLORMAP_JET)
+    intensity_c = to_colormap(dst['intensity'],   cv2.COLORMAP_HOT)
+    refl_c      = to_colormap(dst['reflectivity'],cv2.COLORMAP_PLASMA)
+    amb_c       = to_colormap(dst['ambient'],     cv2.COLORMAP_VIRIDIS)
+
+    cv2.imwrite(f"{tmp_dir}/range_{ts}.png",        range_c)
+    cv2.imwrite(f"{tmp_dir}/intensity_{ts}.png",    intensity_c)
+    cv2.imwrite(f"{tmp_dir}/reflectivity_{ts}.png", refl_c)
+    cv2.imwrite(f"{tmp_dir}/ambient_{ts}.png",      amb_c)
+
+    rospy.loginfo_once(f"First colored frame written to {tmp_dir}")
+
+
+if __name__ == "__main__":
+    rospy.init_node("destagger_to_disk_colormap")
+    rospy.Subscriber("/main/points", PointCloud2, cloud_cb, queue_size=4)
+    rospy.spin()
